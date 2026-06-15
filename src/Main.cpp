@@ -14,7 +14,7 @@
 #include "wind.hpp"
 #include "shader_utils.hpp"
 
-static constexpr int SMAP = 4096;
+static constexpr int SMAP = 2048;
 static constexpr int DEG = 3;
 static constexpr float AMBIENT = 0.7f;
 static constexpr int BUNCH_COUNT = 12;
@@ -22,37 +22,32 @@ static constexpr int ROCK_COUNT = 6;
 static constexpr float SUN_DIST = 2.f;
 
 int main() {
-    // window
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_SAMPLES, 4);
 
-    GLFWwindow* win = glfwCreateWindow(1100, 750, "Test", nullptr, nullptr);
+    GLFWwindow* win = glfwCreateWindow(1100, 750, "Grass", nullptr, nullptr);
     glfwMakeContextCurrent(win);
     glfwSwapInterval(1);
 
-    // input
     glfwSetMouseButtonCallback(win, onMouse);
     glfwSetCursorPosCallback(win, onCursor);
     glfwSetScrollCallback(win, onScroll);
 
-    // opengl
     glewExperimental = GL_TRUE;
     glewInit();
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_MULTISAMPLE);
 
-    // imgui
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOpenGL(win, true);
-    ImGui_ImplOpenGL3_Init("#version 330");
+    ImGui_ImplOpenGL3_Init("#version 460");
     ImGui::GetIO().FontGlobalScale = 1.2f;
 
-    // shaders
     GLuint gProg = linkProgram("shaders/grass.vert", "shaders/grass.frag");
     GLuint pProg = linkProgram("shaders/plane.vert", "shaders/plane.frag");
     GLuint sProg = linkProgram("shaders/sun.vert",   "shaders/sun.frag");
@@ -60,13 +55,16 @@ int main() {
     GLuint rProg = linkProgram("shaders/rock.vert",  "shaders/rock.frag");
     auto ul = [](GLuint p, const char* n) { return glGetUniformLocation(p, n); };
 
-    // wind
     WindParams wind;
+    bool wireframe = false;
+    float prevDir = wind.directionDeg;
 
-    // geometry
     auto knots = generateClampedKnots(5, DEG);
     auto bunches = createGrassBunches(BUNCH_COUNT);
     auto rocks = createRocks(ROCK_COUNT, 0.1f);
+
+    for (auto& bunch : bunches)
+        rebuildSpatialOffsets(bunch, wind);
 
     GLuint pVBO;
     glGenBuffers(1, &pVBO);
@@ -79,20 +77,19 @@ int main() {
     upload(sVBO, sv, GL_STATIC_DRAW);
     GLuint sVAO = makeVAO(sVBO, true);
 
-    // shadow map
     GLuint shadowFBO, shadowTex;
     initShadowMap(shadowFBO, shadowTex, SMAP);
 
-    // sun
     float sunAngle = 45.f;
     float sunHeight = 40.f;
     glm::vec3 lightColor(1.f, 0.97f, 0.85f);
     bool shadows = true;
 
+    glm::mat3 identityNormal(1.f);
+
     while (!glfwWindowShouldClose(win)) {
         glfwPollEvents();
 
-        // imgui
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
@@ -102,19 +99,29 @@ int main() {
         ImGui::Begin("Menu", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
 
         ImGui::Separator(); ImGui::Text("Wind");
-        ImGui::SliderFloat("Sway", &wind.swayAmount, 0.f, 0.08f, "%.4f");
-        ImGui::SliderFloat("Frequency", &wind.frequency, 0.f, 8.f, "%.2f");
+        ImGui::SliderFloat("Sway",      &wind.swayAmount,   0.f, 0.15f,  "%.4f");
+        ImGui::SliderFloat("Frequency", &wind.frequency,    0.f, 4.f,    "%.2f");
+        ImGui::SliderFloat("Gustiness", &wind.gustiness,    0.f, 1.f,    "%.2f");
+        ImGui::SliderFloat("Direction", &wind.directionDeg, 0.f, 360.f,  "%.1f");
 
         ImGui::Separator(); ImGui::Text("Sun");
-        ImGui::SliderFloat("Sun angle", &sunAngle, 0.f, 360.f, "%.1f");
-        ImGui::SliderFloat("Sun height", &sunHeight, -90.f, 90.f, "%.1f");
-        ImGui::Checkbox("Shadows", &shadows);
+        ImGui::SliderFloat("Sun angle",  &sunAngle,  0.f,   360.f, "%.1f");
+        ImGui::SliderFloat("Sun height", &sunHeight, -90.f, 90.f,  "%.1f");
+
+        ImGui::Separator(); ImGui::Text("Debug");
+        ImGui::Checkbox("Shadows",   &shadows);
+        ImGui::Checkbox("Wireframe", &wireframe);
 
         ImGui::Separator(); ImGui::TextDisabled("Camera");
         ImGui::Text("Yaw:%.1f Pitch:%.1f Dist:%.2f", cam.yaw, cam.pitch, cam.dist);
         ImGui::End();
 
-        // sun position
+        if (wind.directionDeg != prevDir) {
+            for (auto& bunch : bunches)
+                rebuildSpatialOffsets(bunch, wind);
+            prevDir = wind.directionDeg;
+        }
+
         float ar = glm::radians(sunAngle);
         float hr = glm::radians(sunHeight);
         glm::vec3 sunPos(
@@ -124,12 +131,11 @@ int main() {
         );
         glm::vec3 lightDir = glm::normalize(sunPos);
 
-        // grass animation
         auto t = static_cast<float>(glfwGetTime());
         std::vector<Vert> gv;
         for (auto& bunch : bunches) {
             gv.clear();
-            gv.reserve(bunch.blades.size() * 32 * 6);
+            gv.reserve(bunch.vertCount);
             for (auto& b : bunch.blades) {
                 updateBlade(b, t, wind);
                 buildBlade(b, knots, DEG, gv);
@@ -137,12 +143,10 @@ int main() {
             upload(bunch.vbo, gv);
         }
 
-        // light
         glm::mat4 lProj = glm::ortho(-0.7f, 0.7f, -0.7f, 0.7f, 0.1f, 6.f);
         glm::mat4 lView = glm::lookAt(glm::normalize(sunPos) * 3.f, { 0,0,0 }, { 0,1,0 });
         glm::mat4 lMVP = lProj * lView;
 
-        // shadow pass
         if (shadows) {
             glBindFramebuffer(GL_FRAMEBUFFER, shadowFBO);
             glViewport(0, 0, SMAP, SMAP);
@@ -153,14 +157,14 @@ int main() {
 
             glm::mat4 identity(1.f);
             glUniformMatrix4fv(glGetUniformLocation(dProg, "uLightMVP"), 1, GL_FALSE, glm::value_ptr(lMVP));
-            glUniformMatrix4fv(glGetUniformLocation(dProg, "uModel"), 1, GL_FALSE, glm::value_ptr(identity));
+            glUniformMatrix4fv(glGetUniformLocation(dProg, "uModel"),    1, GL_FALSE, glm::value_ptr(identity));
 
             glBindVertexArray(pVAO);
             glDrawArrays(GL_TRIANGLES, 0, 6);
 
             for (auto& bunch : bunches) {
                 glBindVertexArray(bunch.vao);
-                glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(bunch.blades.size() * 32 * 6));
+                glDrawArrays(GL_TRIANGLES, 0, bunch.vertCount);
             }
 
             for (auto& rock : rocks) {
@@ -174,7 +178,6 @@ int main() {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
         }
 
-        // main pass
         int fw, fh;
         glfwGetFramebufferSize(win, &fw, &fh);
         glViewport(0, 0, fw, fh);
@@ -184,67 +187,69 @@ int main() {
         glm::mat4 proj = glm::perspective(glm::radians(45.f),
             static_cast<float>(fw) / static_cast<float>(fh), 0.01f, 10.f);
         glm::mat4 MVP = proj * cam.view();
+
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, shadowTex);
 
         auto setCommon = [&](GLuint prog) {
-            glUniformMatrix4fv(ul(prog, "uMVP"), 1, GL_FALSE, glm::value_ptr(MVP));
+            glUniformMatrix4fv(ul(prog, "uMVP"),      1, GL_FALSE, glm::value_ptr(MVP));
             glUniformMatrix4fv(ul(prog, "uLightMVP"), 1, GL_FALSE, glm::value_ptr(lMVP));
-            glUniform3fv(ul(prog, "uLightDir"), 1, glm::value_ptr(lightDir));
+            glUniform3fv(ul(prog, "uLightDir"),   1, glm::value_ptr(lightDir));
             glUniform3fv(ul(prog, "uLightColor"), 1, glm::value_ptr(lightColor));
-            glUniform1i(ul(prog, "uShadowMap"), 0);
+            glUniform1i(ul(prog, "uShadowMap"),      0);
             glUniform1i(ul(prog, "uShadowsEnabled"), shadows ? 1 : 0);
         };
 
-        // plane
+        glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
+
         glUseProgram(pProg);
         setCommon(pProg);
         glUniform1f(ul(pProg, "uAmbient"), AMBIENT + 0.2f);
         glBindVertexArray(pVAO);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
-        // grass
         glUseProgram(gProg);
         setCommon(gProg);
         glUniform1f(ul(gProg, "uAmbient"), AMBIENT);
+        glUniformMatrix3fv(ul(gProg, "uNormalMatrix"), 1, GL_FALSE, glm::value_ptr(identityNormal));
         for (auto& bunch : bunches) {
             glBindVertexArray(bunch.vao);
-            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(bunch.blades.size() * 32 * 6));
+            glDrawArrays(GL_TRIANGLES, 0, bunch.vertCount);
         }
 
-        // rocks
         glUseProgram(rProg);
-        glUniform3fv(ul(rProg, "uLightDir"), 1, glm::value_ptr(lightDir));
+        glUniform3fv(ul(rProg, "uLightDir"),   1, glm::value_ptr(lightDir));
         glUniform3fv(ul(rProg, "uLightColor"), 1, glm::value_ptr(lightColor));
-        glUniform1f(ul(rProg, "uAmbient"), AMBIENT);
-        glUniform1i(ul(rProg, "uShadowMap"), 0);
+        glUniform1f(ul(rProg, "uAmbient"),     AMBIENT);
+        glUniform1i(ul(rProg, "uShadowMap"),      0);
         glUniform1i(ul(rProg, "uShadowsEnabled"), shadows ? 1 : 0);
         glUniformMatrix4fv(ul(rProg, "uLightMVP"), 1, GL_FALSE, glm::value_ptr(lMVP));
         for (auto& rock : rocks) {
             glm::mat4 model = glm::translate(glm::mat4(1.f), rock.pos);
             glm::mat4 rockMVP = MVP * model;
-            glUniformMatrix4fv(ul(rProg, "uMVP"), 1, GL_FALSE, glm::value_ptr(rockMVP));
-            glUniformMatrix4fv(ul(rProg, "uModel"), 1, GL_FALSE, glm::value_ptr(model));
+            glm::mat3 normalMat = glm::transpose(glm::inverse(glm::mat3(model)));
+            glUniformMatrix4fv(ul(rProg, "uMVP"),          1, GL_FALSE, glm::value_ptr(rockMVP));
+            glUniformMatrix4fv(ul(rProg, "uModel"),        1, GL_FALSE, glm::value_ptr(model));
+            glUniformMatrix3fv(ul(rProg, "uNormalMatrix"), 1, GL_FALSE, glm::value_ptr(normalMat));
             glBindVertexArray(rock.vao);
             glDrawArrays(GL_TRIANGLES, 0, rock.vertCount);
         }
 
-        // sun
         glm::mat4 sMVP = MVP * glm::translate(glm::mat4(1.f), sunPos);
         glUseProgram(sProg);
         glUniformMatrix4fv(ul(sProg, "uMVP"), 1, GL_FALSE, glm::value_ptr(sMVP));
-        glUniform3fv(ul(sProg, "uSunColor"), 1, glm::value_ptr(lightColor));
+        glUniform3fv(ul(sProg, "uSunColor"),  1, glm::value_ptr(lightColor));
         glBindVertexArray(sVAO);
         glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(sv.size()));
         glBindVertexArray(0);
 
-        // imgui
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(win);
     }
 
-    // cleanup
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();

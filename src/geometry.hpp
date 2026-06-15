@@ -36,21 +36,22 @@ inline void upload(GLuint vbo, const std::vector<T>& v, GLenum u = GL_DYNAMIC_DR
     glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(v.size() * sizeof(T)), v.data(), u);
 }
 
-inline void buildBlade(const Blade& b, const std::vector<float>& knots, int deg,
-    std::vector<Vert>& out, int steps = 32) {
-    std::vector<glm::vec3> pts(steps + 1);
+static constexpr int BLADE_STEPS = 32;
+
+inline void buildBlade(const Blade& b, const std::vector<float>& knots, int deg, std::vector<Vert>& out) {
+    std::vector<glm::vec3> pts(BLADE_STEPS + 1);
     float t0 = knots.front(), t1 = knots.back();
 
-    for (int i = 0; i <= steps; i++)
+    for (int i = 0; i <= BLADE_STEPS; i++)
         pts[i] = evaluateNURBS(b.anim, b.weights, knots, deg,
-            t0 + (t1 - t0) * static_cast<float>(i) / static_cast<float>(steps));
+            t0 + (t1 - t0) * static_cast<float>(i) / static_cast<float>(BLADE_STEPS));
 
     glm::vec3 side = glm::normalize(glm::vec3(-std::sin(b.radialAngle), 0.f, std::cos(b.radialAngle)));
     glm::vec3 col(0.13f, 0.45f, 0.08f);
 
-    for (int i = 0; i < steps; i++) {
-        float u0 = static_cast<float>(i) / static_cast<float>(steps);
-        float u1 = static_cast<float>(i + 1) / static_cast<float>(steps);
+    for (int i = 0; i < BLADE_STEPS; i++) {
+        float u0 = static_cast<float>(i) / static_cast<float>(BLADE_STEPS);
+        float u1 = static_cast<float>(i + 1) / static_cast<float>(BLADE_STEPS);
         float w0 = b.width * std::pow(1.f - u0, 3.f);
         float w1 = b.width * std::pow(1.f - u1, 3.f);
 
@@ -84,10 +85,10 @@ inline std::vector<glm::vec3> buildSphere(float r = 0.025f, int st = 16, int sl 
         for (int j = 0; j < sl; j++) {
             float t0 = 2.f * glm::pi<float>() * static_cast<float>(j) / static_cast<float>(sl);
             float t1 = 2.f * glm::pi<float>() * static_cast<float>(j + 1) / static_cast<float>(sl);
-            glm::vec3 v00(r * std::cos(p0) * std::cos(t0), r * std::sin(p0), r * std::cos(p0) * std::sin(t0));
-            glm::vec3 v10(r * std::cos(p1) * std::cos(t0), r * std::sin(p1), r * std::cos(p1) * std::sin(t0));
-            glm::vec3 v01(r * std::cos(p0) * std::cos(t1), r * std::sin(p0), r * std::cos(p0) * std::sin(t1));
-            glm::vec3 v11(r * std::cos(p1) * std::cos(t1), r * std::sin(p1), r * std::cos(p1) * std::sin(t1));
+            glm::vec3 v00(r*std::cos(p0)*std::cos(t0), r*std::sin(p0), r*std::cos(p0)*std::sin(t0));
+            glm::vec3 v10(r*std::cos(p1)*std::cos(t0), r*std::sin(p1), r*std::cos(p1)*std::sin(t0));
+            glm::vec3 v01(r*std::cos(p0)*std::cos(t1), r*std::sin(p0), r*std::cos(p0)*std::sin(t1));
+            glm::vec3 v11(r*std::cos(p1)*std::cos(t1), r*std::sin(p1), r*std::cos(p1)*std::sin(t1));
             v.push_back(v00); v.push_back(v10); v.push_back(v11);
             v.push_back(v00); v.push_back(v11); v.push_back(v01);
         }
@@ -97,8 +98,18 @@ inline std::vector<glm::vec3> buildSphere(float r = 0.025f, int st = 16, int sl 
 
 struct GrassBunch {
     std::vector<Blade> blades;
-    GLuint vbo = 0, vao = 0;
+    GLuint vbo = 0;
+    GLuint vao = 0;
+    int vertCount = 0;
 };
+
+inline void rebuildSpatialOffsets(GrassBunch& g, const WindParams& w) {
+    float dir = w.directionRad();
+    float dx = std::cos(dir);
+    float dz = std::sin(dir);
+    for (auto& b : g.blades)
+        b.spatialOff = (b.ctrl[0].x * dx + b.ctrl[0].z * dz) * 2.5f;
+}
 
 inline GrassBunch createGrassBunch(float cx, float cz, int count, float minLen, float maxLen) {
     GrassBunch g;
@@ -113,6 +124,7 @@ inline GrassBunch createGrassBunch(float cx, float cz, int count, float minLen, 
             for (auto& p : b.ctrl) p = base + (p - base) * (b.height / origLen);
         b.anim = b.ctrl;
     }
+    g.vertCount = static_cast<int>(g.blades.size()) * BLADE_STEPS * 6;
     glGenBuffers(1, &g.vbo);
     g.vao = makeVAO(g.vbo);
     return g;
@@ -134,7 +146,8 @@ inline std::vector<GrassBunch> createGrassBunches(int count) {
 
 struct Rock {
     glm::vec3 pos{};
-    GLuint vbo = 0, vao = 0;
+    GLuint vbo = 0;
+    GLuint vao = 0;
     int vertCount = 0;
 };
 
